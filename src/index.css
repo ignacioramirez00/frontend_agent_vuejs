@@ -1,0 +1,30 @@
+@import "tailwindcss";
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+@theme {
+  --font-sans: 'Inter', sans-serif;
+  --color-brand-surface: #f9f9ff;
+  --color-brand-bubble-ai: #ffffff;
+  --color-brand-bubble-user: #e9edff;
+  --color-brand-bubble-user-highest: #dce2f7;
+  --color-brand-text: #141b2b;
+  --color-brand-text-muted: #444748;
+}
+
+body {
+  background-color: #f9f9ff;
+  font-family: 'Inter', sans-serif;
+  color: #141b2b;
+  margin: 0;
+  padding: 0;
+}
+
+/* Custom scrollbar hiding but functional */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
