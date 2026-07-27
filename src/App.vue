@@ -27,15 +27,7 @@ interface Message {
   isCustomResponse?: boolean;
 }
 
-// Initial mockup conversation
-const getInitialMessages = (): Message[] => [
-  {
-    id: 'msg-1',
-    role: 'assistant',
-    content: "¡Hola! Soy tu asistente de catalogación. ¿Qué deseas hacer hoy?\n * Catalogar un nuevo material\n * Consultar el estado de una solicitud\n * Buscar materiales similares ya catalogados\n\nEscribe tu opción o pregúntame si tienes dudas",
-    time: '10:00 AM'
-  }
-];
+const getInitialMessages = (): Message[] => [];
 
 // Reactive states
 const messages = ref<Message[]>(getInitialMessages());
@@ -83,61 +75,155 @@ watch(() => messages.value.length, () => {
 }, { deep: true });
 
 const sessionId = "67890";
+const dynamicOptions = ref<{ value: string; label: string }[]>([]);
+const dynamicLinks = ref<{ code: string; description: string; url: string }[]>([]);
+const catalogProgress = ref<{ pending: string[]; completed: Record<string, string> } | null>(null);
+const currentPhase = ref<string | null>(null);
+
+/**
+ * Convierte markdown links [texto](url) a <a> clicables y preserva saltos de línea.
+ * Solo se aplica a mensajes del bot (nunca al texto del usuario) para evitar XSS.
+ */
+const renderContent = (text: string): string => {
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return escaped
+    .replace(
+      /\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer" class="text-blue-600 underline hover:text-blue-800 font-medium">$1</a>'
+    )
+    .replace(/\n/g, '<br/>');
+};
+
+const invokeAgentStream = async (payload: any) => {
+
+  isTyping.value = true;
+  await scrollToBottom();
+  
+  dynamicOptions.value = [];
+  dynamicLinks.value = [];
+  catalogProgress.value = null;
+
+
+  const botMessageId = `msg-${Date.now()}`;
+  messages.value.push({
+    id: botMessageId,
+    role: 'assistant',
+    content: '',
+    time: getCurrentTime()
+  });
+
+  try {
+    const response = await fetch("http://localhost:8000/api/v1/agents/cataloging/invoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, stream: true })
+    });
+
+    if (!response.ok) {
+      throw new Error("HTTP error " + response.status);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("ReadableStream not supported.");
+
+    const decoder = new TextDecoder();
+    let finished = false;
+
+    while (!finished) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value);
+      const lines = chunk.split("\n\n");
+
+      for (const line of lines) {
+        if (!line.trim() || line.startsWith("data: [DONE]")) {
+          continue;
+        }
+
+        const jsonStr = line.replace(/^data:\s*/, "");
+        try {
+          const parsed = JSON.parse(jsonStr);
+
+          if (parsed.chunk) {
+            const msgIndex = messages.value.findIndex(m => m.id === botMessageId);
+            if (msgIndex !== -1) {
+              messages.value[msgIndex].content += parsed.chunk;
+              scrollToBottom();
+            }
+          }
+
+          if (parsed.options) {
+            console.log("Fase actual:", parsed.phase);
+            console.log("Botones a mostrar:", parsed.options);
+            dynamicOptions.value = parsed.options;
+            scrollToBottom();
+          }
+
+          if (parsed.links && Array.isArray(parsed.links)) {
+            dynamicLinks.value = parsed.links;
+            scrollToBottom();
+          }
+
+          if (parsed.phase !== undefined) {
+            currentPhase.value = parsed.phase;
+          }
+
+          if (parsed.catalogProgress !== undefined) {
+            catalogProgress.value = parsed.catalogProgress;
+          } else if (parsed.phase && parsed.phase !== 'catalog') {
+            catalogProgress.value = null;
+          }
+        } catch (err) {
+          console.error("Error parseando línea SSE:", line, err);
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Error communicating with backend:", error);
+    const msgIndex = messages.value.findIndex(m => m.id === botMessageId);
+    if (msgIndex !== -1) {
+      messages.value[msgIndex].content = "Error de comunicación con el backend.";
+    }
+  } finally {
+    isTyping.value = false;
+    scrollToBottom();
+  }
+};
 
 const initSession = async () => {
-  try {
-    await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sessionId: sessionId,
-        type: "init",
-        userContext: {
-          clientCode: "codelco",
-          userDivisionIds: "[\"division_codelco_id\"]",
-          divisionCode: "CO01", 
-          divisionName: "División Chuquicamata",
-          userName: "Carlos Gómez",
-          userEmail: "cgomez@codelco.cl"
-        }
-      })
-    });
-  } catch (error) {
-    console.error("Failed to init session", error);
-  }
+  await invokeAgentStream({
+    sessionId: sessionId,
+    type: "init",
+    userContext: {
+      clientCode: "amsa",
+      userDivisionIds: "[52,65,78,55,64]",
+      divisionCode: "0001", 
+      divisionName: "Central Concen.",
+      userName: "Usuario",
+      userEmail: ""
+    }
+  });
 };
+/*
+      userContext: {
+      clientCode: "codelco",
+      userDivisionIds: "[\"division_codelco_id\"]",
+      divisionCode: "CO01", 
+      divisionName: "División Chuquicamata",
+      userName: "Carlos Gómez",
+      userEmail: "cgomez@codelco.cl"
+    }
+*/
 
-onMounted(() => {
-  initSession();
-  scrollToBottom();
-});
-
-// Copy specific draft email content to clipboard
-const copyDraftToClipboard = async (text: string, msgId: string) => {
-  try {
-    await navigator.clipboard.writeText(text);
-    copiedId.value = msgId;
-    setTimeout(() => {
-      copiedId.value = null;
-    }, 2000);
-  } catch (err) {
-    console.error('Failed to copy text: ', err);
-  }
-};
-
-// Clear chat history
-const clearChat = () => {
-  messages.value = [];
-  showMenu.value = false;
-  attachedFile.value = null;
-};
-
-// Reset chat history to mock baseline
 const resetChat = () => {
   messages.value = getInitialMessages();
   showMenu.value = false;
   attachedFile.value = null;
-  scrollToBottom();
+  initSession();
 };
 
 // Simulate attachment selection
@@ -160,7 +246,6 @@ const sendMessage = async (customText?: string) => {
   const currentText = textToSend;
   inputMessage.value = '';
 
-  // Add user message
   messages.value.push({
     id: `msg-${Date.now()}`,
     role: 'user',
@@ -168,88 +253,15 @@ const sendMessage = async (customText?: string) => {
     time: getCurrentTime()
   });
 
-  // Clear attached file if sent
   const attachedContext = attachedFile.value ? `\n\n[Attached File: ${attachedFile.value.name}]\n${attachedFile.value.content}` : '';
   attachedFile.value = null;
 
-  isTyping.value = true;
-  await scrollToBottom();
-
-  try {
-    // We send current chat history and current message to the server
-    const apiHistory = messages.value.slice(0, -1).map(m => {
-      // Re-create complete message content if there was a draft box
-      const content = m.isDraft && m.draftContent 
-        ? `${m.content}\n\n[Draft Email]:\n"${m.draftContent}"`
-        : m.content;
-      return { role: m.role, content };
-    });
-
-    const payloadMessage = currentText + attachedContext;
-
-    const response = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sessionId: sessionId,
-        type: "text",
-        message: payloadMessage
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error("Server error");
-    }
-
-    const data = await response.json();
-    
-    // Parse response to check if it contains a drafted email
-    // If it contains double quotes containing "Hi team" or has clear "Dear" / "Hi" / subject etc, we can highlight it.
-    // Let's do a smart regex check to display draft emails in high-fidelity boxes!
-    let contentText = data.text;
-    let isDraft = false;
-    let draftContent = "";
-    let mainContent = contentText;
-
-    // Search for quoted email-like patterns or markdown blockquotes
-    const draftRegex = /(?:["']Hi team[^"']+["']|["']Subject:[^"']+["']|```[^`]+```)/i;
-    const match = contentText.match(draftRegex);
-
-    if (match) {
-      isDraft = true;
-      draftContent = match[0].replace(/^[ \t]*```[a-z]*\n?/im, '').replace(/```[ \t]*$/m, '').replace(/^"|"$/g, '').trim();
-      mainContent = contentText.replace(match[0], '').trim();
-      if (!mainContent) {
-        mainContent = "Here is the revised draft email for your team:";
-      }
-    }
-
-    messages.value.push({
-      id: `msg-${Date.now() + 1}`,
-      role: 'assistant',
-      content: mainContent,
-      time: getCurrentTime(),
-      isDraft,
-      draftContent: draftContent || undefined
-    });
-
-  } catch (error) {
-    console.error('API Error:', error);
-    messages.value.push({
-      id: `msg-${Date.now() + 1}`,
-      role: 'assistant',
-      content: "I'm having trouble connecting to the backend service. Let me simulate a friendly assistant reply:",
-      time: getCurrentTime(),
-      isDraft: currentText.toLowerCase().includes('formal'),
-      draftContent: currentText.toLowerCase().includes('formal') 
-        ? "Dear Team,\n\nI am writing to inform you that I will be delayed by approximately fifteen minutes this morning. Consequently, I will be late for our morning synchronization meeting. Please proceed with the scheduled agenda in my absence, and I will join the session as soon as I arrive.\n\nThank you for your understanding.\n\nSincerely,\nTeam Member"
-        : "I received your message! Let me know what changes or email draft drafts you want me to write next.",
-      isCustomResponse: true
-    });
-  } finally {
-    isTyping.value = false;
-    await scrollToBottom();
-  }
+  const payloadMessage = currentText + attachedContext;
+  await invokeAgentStream({
+    sessionId: sessionId,
+    type: "text",
+    message: payloadMessage
+  });
 };
 
 // Quick reply chip click handler
@@ -260,48 +272,26 @@ const handleQuickReply = async (label: string, value: string) => {
     content: label,
     time: getCurrentTime()
   });
-  
-  isTyping.value = true;
-  await scrollToBottom();
-  
-  try {
-    const response = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sessionId: sessionId,
-        type: "selection",
-        selection: {
-          value: value,
-          label: label
-        }
-      })
-    });
-    const data = await response.json();
-    messages.value.push({
-      id: `msg-${Date.now() + 1}`,
-      role: 'assistant',
-      content: data.text,
-      time: getCurrentTime()
-    });
-  } catch(e) {
-    messages.value.push({
-      id: `msg-${Date.now() + 1}`,
-      role: 'assistant',
-      content: "Error al enviar selección.",
-      time: getCurrentTime()
-    });
-  } finally {
-    isTyping.value = false;
-    await scrollToBottom();
-  }
+
+  await invokeAgentStream({
+    sessionId: sessionId,
+    type: "selection",
+    selection: {
+      value: value,
+      label: label
+    }
+  });
 };
 
 // Check if current messages list matches the mockup baseline to offer quick chips
 const showQuickChips = () => {
   const lastMsg = messages.value[messages.value.length - 1];
-  return lastMsg && lastMsg.role === 'assistant' && lastMsg.content.includes('¿Qué deseas hacer hoy?');
+  return lastMsg && lastMsg.role === 'assistant' && dynamicOptions.value.length > 0;
 };
+
+onMounted(() => {
+  initSession();
+});
 </script>
 
 <template>
@@ -407,7 +397,15 @@ const showQuickChips = () => {
                     : 'bg-white text-brand-text border-gray-100 rounded-bl-xs'
                 ]"
               >
-                <p class="whitespace-pre-wrap">{{ msg.content }}</p>
+                <p 
+                  class="whitespace-pre-wrap"
+                  v-if="msg.role === 'user'"
+                >{{ msg.content }}</p>
+                <p 
+                  v-else
+                  class="leading-relaxed"
+                  v-html="renderContent(msg.content)"
+                ></p>
 
                 <!-- Draft Email Container Block -->
                 <div 
@@ -456,28 +454,54 @@ const showQuickChips = () => {
             </span>
           </div>
 
+          <!-- Catalog Attribute Progress Panel -->
+          <div
+            v-if="catalogProgress && currentPhase === 'catalog' && !isTyping"
+            class="ml-10 mt-1 mb-1 bg-white border border-gray-100 rounded-2xl shadow-sm p-4 flex flex-col gap-3 max-w-sm"
+          >
+            <p class="text-[11px] font-semibold text-gray-400 uppercase tracking-wide">Progreso de atributos</p>
+
+            <!-- Completed -->
+            <div v-if="Object.keys(catalogProgress.completed).length > 0" class="flex flex-col gap-1.5">
+              <p class="text-[10px] font-semibold text-emerald-600 uppercase tracking-wide">✓ Completados</p>
+              <div
+                v-for="(val, attr) in catalogProgress.completed"
+                :key="String(attr)"
+                class="flex items-center justify-between gap-3 px-3 py-1.5 bg-emerald-50 border border-emerald-100 rounded-lg"
+              >
+                <span class="text-[12px] text-emerald-800 font-medium capitalize">{{ attr }}</span>
+                <span class="text-[12px] text-emerald-700 font-semibold truncate max-w-[120px]">{{ val }}</span>
+              </div>
+            </div>
+
+            <!-- Pending -->
+            <div v-if="catalogProgress.pending.length > 0" class="flex flex-col gap-1.5">
+              <p class="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Pendientes: {{ catalogProgress.pending.length }}</p>
+              <div
+                v-for="attr in catalogProgress.pending"
+                :key="attr"
+                class="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border border-gray-100 rounded-lg"
+              >
+                <span class="w-1.5 h-1.5 rounded-full bg-gray-300 flex-shrink-0"></span>
+                <span class="text-[12px] text-gray-500 capitalize">{{ attr }}</span>
+              </div>
+            </div>
+          </div>
+
+  
+
           <!-- Dynamic Quick Reply Chips -->
           <div 
             v-if="showQuickChips() && !isTyping"
             class="flex gap-2 ml-10 overflow-x-auto no-scrollbar py-1"
           >
             <button 
-              @click="handleQuickReply('Catalogar un nuevo material', 'catalogar_nuevo')"
+              v-for="opt in dynamicOptions"
+              :key="opt.value"
+              @click="handleQuickReply(opt.label, opt.value)"
               class="whitespace-nowrap px-4 py-2 rounded-full border border-gray-200 text-xs font-semibold text-brand-text-muted hover:bg-gray-50 hover:text-brand-text active:scale-95 transition-all bg-white shadow-2xs cursor-pointer"
             >
-              Catalogar un nuevo material
-            </button>
-            <button 
-              @click="handleQuickReply('Consultar el estado', 'consultar_estado')"
-              class="whitespace-nowrap px-4 py-2 rounded-full border border-gray-200 text-xs font-semibold text-brand-text-muted hover:bg-gray-50 hover:text-brand-text active:scale-95 transition-all bg-white shadow-2xs cursor-pointer"
-            >
-              Consultar el estado
-            </button>
-            <button 
-              @click="handleQuickReply('Buscar similares', 'buscar_similares')"
-              class="whitespace-nowrap px-4 py-2 rounded-full border border-gray-200 text-xs font-semibold text-brand-text-muted hover:bg-gray-50 hover:text-brand-text active:scale-95 transition-all bg-white shadow-2xs cursor-pointer"
-            >
-              Buscar similares
+              {{ opt.label }}
             </button>
           </div>
 
