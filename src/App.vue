@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, nextTick, watch } from 'vue';
+import { marked } from 'marked';
 import { 
   Send, 
   Plus, 
@@ -81,20 +82,11 @@ const catalogProgress = ref<{ pending: string[]; completed: Record<string, strin
 const currentPhase = ref<string | null>(null);
 
 /**
- * Convierte markdown links [texto](url) a <a> clicables y preserva saltos de línea.
- * Solo se aplica a mensajes del bot (nunca al texto del usuario) para evitar XSS.
+ * Renderiza markdown completo (tablas, negritas, listas, links, etc.) a HTML seguro.
+ * Solo se aplica a mensajes del bot para evitar XSS en input del usuario.
  */
 const renderContent = (text: string): string => {
-  const escaped = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-  return escaped
-    .replace(
-      /\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,
-      '<a href="$2" target="_blank" rel="noopener noreferrer" class="text-blue-600 underline hover:text-blue-800 font-medium">$1</a>'
-    )
-    .replace(/\n/g, '<br/>');
+  return marked.parse(text, { async: false }) as string;
 };
 
 const invokeAgentStream = async (payload: any) => {
@@ -642,5 +634,57 @@ onMounted(() => {
 /* Scoped transitions & styling adjustments */
 .shadow-2xs {
   box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.03);
+}
+
+/* Markdown rendered inside bot bubbles */
+:deep(p) {
+  margin: 0 0 0.4em;
+  line-height: 1.6;
+}
+:deep(p:last-child) {
+  margin-bottom: 0;
+}
+:deep(strong) {
+  font-weight: 600;
+  color: #1e1e2e;
+}
+:deep(table) {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5em 0;
+  font-size: 0.92em;
+  border-radius: 8px;
+  overflow: hidden;
+}
+:deep(thead tr) {
+  background-color: #f0f2ff;
+}
+:deep(th) {
+  padding: 8px 14px;
+  text-align: left;
+  font-weight: 600;
+  color: #3a3a5c;
+  border-bottom: 2px solid #dce2f7;
+}
+:deep(td) {
+  padding: 7px 14px;
+  border-bottom: 1px solid #eef0f8;
+  color: #3a3a5c;
+}
+:deep(tbody tr:last-child td) {
+  border-bottom: none;
+}
+:deep(tbody tr:hover) {
+  background-color: #f7f8ff;
+}
+:deep(a) {
+  color: #4361ee;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color 0.15s;
+}
+:deep(a:hover) {
+  color: #2940c8;
 }
 </style>
