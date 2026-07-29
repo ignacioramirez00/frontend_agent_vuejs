@@ -11,27 +11,16 @@ async function startServer() {
 
   app.use(express.json());
 
-  // API endpoint for chat messages
+  // Proxy hacia el backend real del Chatbot (LangGraph/FastAPI).
   app.post("/api/chat", async (req, res) => {
     try {
-      const payload = req.body;
-      let responseText = "";
-
-      if (payload.type === 'init') {
-        responseText = `API: Sesión ${payload.sessionId} inicializada para ${payload.userContext?.userName} (${payload.userContext?.clientCode})`;
-      } else if (payload.type === 'text') {
-        if (!payload.message) {
-          res.status(400).json({ error: "Message is required for text type" });
-          return;
-        }
-        responseText = `API recibió texto: ${payload.message}`;
-      } else if (payload.type === 'selection') {
-        responseText = `API procesó selección: ${payload.selection?.label} (Valor: ${payload.selection?.value})`;
-      } else {
-        responseText = `Echo genérico o tipo desconocido: ${JSON.stringify(payload)}`;
-      }
-
-      res.json({ text: responseText });
+      const backendRes = await fetch("http://localhost:8000/api/v1/agents/cataloging/invoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...req.body, stream: false }),
+      });
+      const data = await backendRes.json();
+      res.status(backendRes.status).json(data);
     } catch (error: any) {
       console.error("API Error:", error);
       res.status(500).json({ error: error.message || "Internal server error" });

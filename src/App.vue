@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick, watch } from 'vue';
+import { ref, computed, onMounted, nextTick, watch } from 'vue';
 import { 
   Send, 
   Plus, 
@@ -17,6 +17,11 @@ import {
   AlertCircle
 } from 'lucide-vue-next';
 
+interface OptionItem {
+  value: string;
+  label: string;
+}
+
 interface Message {
   id: string;
   role: 'assistant' | 'user';
@@ -25,6 +30,9 @@ interface Message {
   isDraft?: boolean;
   draftContent?: string;
   isCustomResponse?: boolean;
+  // Botones que ofrece el backend real (AgentResponse.options) para este
+  // mensaje puntual — vacío/ausente significa "responder con texto libre".
+  options?: OptionItem[];
 }
 
 // Initial mockup conversation
@@ -37,8 +45,39 @@ const getInitialMessages = (): Message[] => [
   }
 ];
 
+// Identidad de la sesión de prueba: sale de variables de entorno (.env,
+// gitignoreado) y NO se hardcodea acá, porque este repo es público y los
+// valores reales son datos de usuarios (UUID, nombre, email, divisiones).
+// Copiar .env.example a .env y completarlo. Ver README.
+const sessionId = import.meta.env.VITE_SESSION_ID ?? "";
+
+// Mismo userContext para todo "init" real (montaje inicial y restart) — no
+// hay login en este harness de pruebas, solo se replica el comportamiento
+// del chat real.
+const userContext = {
+  clientCode: import.meta.env.VITE_USER_CLIENT_CODE ?? "",
+  userDivisionIds: import.meta.env.VITE_USER_DIVISION_IDS ?? "[]",
+  divisionCode: import.meta.env.VITE_USER_DIVISION_CODE ?? "",
+  divisionName: import.meta.env.VITE_USER_DIVISION_NAME ?? "",
+  userName: import.meta.env.VITE_USER_NAME ?? "",
+  userEmail: import.meta.env.VITE_USER_EMAIL ?? ""
+};
+
+// Aviso temprano y explícito: sin sessionId el backend no puede resolver el
+// thread del checkpointer, así que mejor enterarse acá que ver fallar el
+// /invoke sin motivo aparente.
+if (!sessionId) {
+  console.warn(
+    "[harness] VITE_SESSION_ID está vacío: copiá .env.example a .env y completá los valores."
+  );
+}
+
 // Reactive states
-const messages = ref<Message[]>(getInitialMessages());
+// El historial visual sale del backend (AgentResponse.history al reanudar
+// un "init"), no de localStorage — así nunca queda desincronizado si el
+// checkpoint se borró (finalizar/TTL): en ese caso el backend simplemente
+// no manda historial, y acá arranca vacío otra vez.
+const messages = ref<Message[]>([]);
 const inputMessage = ref('');
 const isTyping = ref(false);
 const showMenu = ref(false);
@@ -82,28 +121,44 @@ watch(() => messages.value.length, () => {
   scrollToBottom();
 }, { deep: true });
 
-const sessionId = "67890";
-
 const initSession = async () => {
   try {
-    await fetch('/api/chat', {
+    const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         sessionId: sessionId,
         type: "init",
-        userContext: {
-          clientCode: "codelco",
-          userDivisionIds: "[\"division_codelco_id\"]",
-          divisionCode: "CO01", 
-          divisionName: "División Chuquicamata",
-          userName: "Carlos Gómez",
-          userEmail: "cgomez@codelco.cl"
-        }
+        userContext
       })
     });
+    if (!response.ok) throw new Error("Server error");
+
+    const data = await response.json();
+    // data.history son los turnos previos (checkpoint vivo = reanuda donde
+    // quedó); vacío si el backend no tenía nada que reanudar (thread nuevo,
+    // o borrado por finalizar/TTL) — en ese caso esto es solo el saludo.
+    const history = (data.history ?? []).map((h: { role: 'user' | 'assistant'; text: string }) => ({
+      id: `msg-${Date.now()}-${Math.random()}`,
+      role: h.role,
+      content: h.text,
+      time: getCurrentTime()
+    }));
+    messages.value = [
+      ...history,
+      {
+        id: `msg-${Date.now()}`,
+        role: 'assistant',
+        content: data.text ?? '',
+        time: getCurrentTime(),
+        options: data.options
+      }
+    ];
   } catch (error) {
     console.error("Failed to init session", error);
+    // Sin backend disponible: mostrar el mock de bienvenida en vez de dejar
+    // la ventana del chat vacía.
+    messages.value = getInitialMessages();
   }
 };
 
@@ -230,7 +285,8 @@ const sendMessage = async (customText?: string) => {
       content: mainContent,
       time: getCurrentTime(),
       isDraft,
-      draftContent: draftContent || undefined
+      draftContent: draftContent || undefined,
+      options: data.options
     });
 
   } catch (error) {
@@ -238,12 +294,8 @@ const sendMessage = async (customText?: string) => {
     messages.value.push({
       id: `msg-${Date.now() + 1}`,
       role: 'assistant',
-      content: "I'm having trouble connecting to the backend service. Let me simulate a friendly assistant reply:",
+      content: "No se pudo conectar con el backend. Verifica que esté corriendo en el puerto 8000 (uv run uvicorn src.main:app --port 8000).",
       time: getCurrentTime(),
-      isDraft: currentText.toLowerCase().includes('formal'),
-      draftContent: currentText.toLowerCase().includes('formal') 
-        ? "Dear Team,\n\nI am writing to inform you that I will be delayed by approximately fifteen minutes this morning. Consequently, I will be late for our morning synchronization meeting. Please proceed with the scheduled agenda in my absence, and I will join the session as soon as I arrive.\n\nThank you for your understanding.\n\nSincerely,\nTeam Member"
-        : "I received your message! Let me know what changes or email draft drafts you want me to write next.",
       isCustomResponse: true
     });
   } finally {
@@ -252,7 +304,12 @@ const sendMessage = async (customText?: string) => {
   }
 };
 
-// Quick reply chip click handler
+// Quick reply chip click handler. "restart" es un caso especial: el front
+// real lo intercepta y manda type="init" (reseed completo de userContext)
+// en vez de una selection normal — ver Chatbot-CLAUDE.md, hallazgo 8. Sin
+// esto, el botón cae del lado del backend en fallback (a propósito: sin
+// esta intercepción, el thread ya está borrado y una selection nunca trae
+// userContext para reconstruirlo).
 const handleQuickReply = async (label: string, value: string) => {
   messages.value.push({
     id: `msg-${Date.now()}`,
@@ -260,29 +317,28 @@ const handleQuickReply = async (label: string, value: string) => {
     content: label,
     time: getCurrentTime()
   });
-  
+
   isTyping.value = true;
   await scrollToBottom();
-  
+
   try {
+    const body = value === "restart"
+      ? { sessionId, type: "init", userContext }
+      : { sessionId, type: "selection", selection: { value, label } };
+
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sessionId: sessionId,
-        type: "selection",
-        selection: {
-          value: value,
-          label: label
-        }
-      })
+      body: JSON.stringify(body)
     });
+    if (!response.ok) throw new Error("Server error");
     const data = await response.json();
     messages.value.push({
       id: `msg-${Date.now() + 1}`,
       role: 'assistant',
-      content: data.text,
-      time: getCurrentTime()
+      content: data.text ?? '',
+      time: getCurrentTime(),
+      options: data.options
     });
   } catch(e) {
     messages.value.push({
@@ -297,11 +353,14 @@ const handleQuickReply = async (label: string, value: string) => {
   }
 };
 
-// Check if current messages list matches the mockup baseline to offer quick chips
-const showQuickChips = () => {
+// Opciones dinámicas del último mensaje del asistente (options que manda el
+// backend real: AgentResponse.options). Reemplaza el string-match hardcodeado
+// contra el texto del mensaje mock inicial, que no reflejaba nada del backend.
+const lastMessageOptions = computed<OptionItem[]>(() => {
   const lastMsg = messages.value[messages.value.length - 1];
-  return lastMsg && lastMsg.role === 'assistant' && lastMsg.content.includes('¿Qué deseas hacer hoy?');
-};
+  if (!lastMsg || lastMsg.role !== 'assistant') return [];
+  return lastMsg.options?.length ? lastMsg.options : [];
+});
 </script>
 
 <template>
@@ -456,28 +515,20 @@ const showQuickChips = () => {
             </span>
           </div>
 
-          <!-- Dynamic Quick Reply Chips -->
-          <div 
-            v-if="showQuickChips() && !isTyping"
-            class="flex gap-2 ml-10 overflow-x-auto no-scrollbar py-1"
+          <!-- Opciones dinámicas: botones que manda el backend real en options,
+               para el último mensaje del asistente (division, combos del wizard,
+               menú principal, etc. — lo que sea que responda el turno actual) -->
+          <div
+            v-if="lastMessageOptions.length && !isTyping"
+            class="flex gap-2 ml-10 flex-wrap py-1"
           >
-            <button 
-              @click="handleQuickReply('Catalogar un nuevo material', 'catalogar_nuevo')"
+            <button
+              v-for="opt in lastMessageOptions"
+              :key="opt.value"
+              @click="handleQuickReply(opt.label, opt.value)"
               class="whitespace-nowrap px-4 py-2 rounded-full border border-gray-200 text-xs font-semibold text-brand-text-muted hover:bg-gray-50 hover:text-brand-text active:scale-95 transition-all bg-white shadow-2xs cursor-pointer"
             >
-              Catalogar un nuevo material
-            </button>
-            <button 
-              @click="handleQuickReply('Consultar el estado', 'consultar_estado')"
-              class="whitespace-nowrap px-4 py-2 rounded-full border border-gray-200 text-xs font-semibold text-brand-text-muted hover:bg-gray-50 hover:text-brand-text active:scale-95 transition-all bg-white shadow-2xs cursor-pointer"
-            >
-              Consultar el estado
-            </button>
-            <button 
-              @click="handleQuickReply('Buscar similares', 'buscar_similares')"
-              class="whitespace-nowrap px-4 py-2 rounded-full border border-gray-200 text-xs font-semibold text-brand-text-muted hover:bg-gray-50 hover:text-brand-text active:scale-95 transition-all bg-white shadow-2xs cursor-pointer"
-            >
-              Buscar similares
+              {{ opt.label }}
             </button>
           </div>
 
