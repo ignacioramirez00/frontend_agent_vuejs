@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick, watch } from 'vue';
+import { marked } from 'marked';
 import { 
   Send, 
   Plus, 
@@ -120,6 +121,15 @@ const scrollToBottom = async () => {
 watch(() => messages.value.length, () => {
   scrollToBottom();
 }, { deep: true });
+
+/**
+ * Renderiza markdown (tablas, negritas, listas, links, etc.) a HTML.
+ * Se aplica a mensajes del asistente.
+ */
+const renderContent = (text: string): string => {
+  if (!text) return '';
+  return marked.parse(text, { breaks: true, gfm: true }) as string;
+};
 
 const initSession = async () => {
   try {
@@ -466,7 +476,12 @@ const lastMessageOptions = computed<OptionItem[]>(() => {
                     : 'bg-white text-brand-text border-gray-100 rounded-bl-xs'
                 ]"
               >
-                <p class="whitespace-pre-wrap">{{ msg.content }}</p>
+                <div 
+                  v-if="msg.role === 'assistant'" 
+                  class="markdown-content" 
+                  v-html="renderContent(msg.content)"
+                ></div>
+                <p v-else class="whitespace-pre-wrap">{{ msg.content }}</p>
 
                 <!-- Draft Email Container Block -->
                 <div 
@@ -669,5 +684,57 @@ const lastMessageOptions = computed<OptionItem[]>(() => {
 /* Scoped transitions & styling adjustments */
 .shadow-2xs {
   box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.03);
+}
+
+/* Markdown rendered inside bot bubbles */
+:deep(p) {
+  margin: 0 0 0.4em;
+  line-height: 1.6;
+}
+:deep(p:last-child) {
+  margin-bottom: 0;
+}
+:deep(strong) {
+  font-weight: 600;
+  color: #1e1e2e;
+}
+:deep(table) {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5em 0;
+  font-size: 0.92em;
+  border-radius: 8px;
+  overflow: hidden;
+}
+:deep(thead tr) {
+  background-color: #f0f2ff;
+}
+:deep(th) {
+  padding: 8px 14px;
+  text-align: left;
+  font-weight: 600;
+  color: #3a3a5c;
+  border-bottom: 2px solid #dce2f7;
+}
+:deep(td) {
+  padding: 7px 14px;
+  border-bottom: 1px solid #eef0f8;
+  color: #3a3a5c;
+}
+:deep(tbody tr:last-child td) {
+  border-bottom: none;
+}
+:deep(tbody tr:hover) {
+  background-color: #f7f8ff;
+}
+:deep(a) {
+  color: #4361ee;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color 0.15s;
+}
+:deep(a:hover) {
+  color: #2940c8;
 }
 </style>
