@@ -23,6 +23,15 @@ interface OptionItem {
   label: string;
 }
 
+// AgentResponse.catalogProgress — progreso de atributos obligatorios durante
+// la fase de catalogación (src/agents/cataloging/nodes/catalog.py).
+interface CatalogProgress {
+  pending: string[];
+  completed: Record<string, string>;
+  total: number;
+  completedCount: number;
+}
+
 interface Message {
   id: string;
   role: 'assistant' | 'user';
@@ -34,6 +43,9 @@ interface Message {
   // Botones que ofrece el backend real (AgentResponse.options) para este
   // mensaje puntual — vacío/ausente significa "responder con texto libre".
   options?: OptionItem[];
+  // Progreso de atributos obligatorios (AgentResponse.catalogProgress) para
+  // este mensaje puntual — null/ausente fuera de la fase de catalogación.
+  catalogProgress?: CatalogProgress | null;
 }
 
 // Initial mockup conversation
@@ -161,7 +173,8 @@ const initSession = async () => {
         role: 'assistant',
         content: data.text ?? '',
         time: getCurrentTime(),
-        options: data.options
+        options: data.options,
+        catalogProgress: data.catalogProgress
       }
     ];
   } catch (error) {
@@ -296,7 +309,8 @@ const sendMessage = async (customText?: string) => {
       time: getCurrentTime(),
       isDraft,
       draftContent: draftContent || undefined,
-      options: data.options
+      options: data.options,
+      catalogProgress: data.catalogProgress
     });
 
   } catch (error) {
@@ -348,7 +362,8 @@ const handleQuickReply = async (label: string, value: string) => {
       role: 'assistant',
       content: data.text ?? '',
       time: getCurrentTime(),
-      options: data.options
+      options: data.options,
+      catalogProgress: data.catalogProgress
     });
   } catch(e) {
     messages.value.push({
@@ -371,6 +386,18 @@ const lastMessageOptions = computed<OptionItem[]>(() => {
   if (!lastMsg || lastMsg.role !== 'assistant') return [];
   return lastMsg.options?.length ? lastMsg.options : [];
 });
+
+// Progreso de atributos obligatorios del último mensaje del asistente
+// (AgentResponse.catalogProgress) — solo existe durante la fase "catalog".
+const lastMessageProgress = computed<CatalogProgress | null>(() => {
+  const lastMsg = messages.value[messages.value.length - 1];
+  if (!lastMsg || lastMsg.role !== 'assistant') return null;
+  const progress = lastMsg.catalogProgress;
+  return progress && progress.total > 0 ? progress : null;
+});
+
+const showCompletedAttrs = ref(true);
+const showPendingAttrs = ref(true);
 </script>
 
 <template>
@@ -528,6 +555,65 @@ const lastMessageOptions = computed<OptionItem[]>(() => {
             >
               {{ msg.time }}
             </span>
+          </div>
+
+          <!-- Progreso de atributos obligatorios (AgentResponse.catalogProgress),
+               visible mientras se está completando la ficha de catalogación. -->
+          <div
+            v-if="lastMessageProgress"
+            class="ml-10 flex flex-col gap-3 bg-white border border-gray-100 rounded-2xl shadow-sm p-4"
+          >
+            <div class="flex items-center justify-between">
+              <span class="text-sm font-semibold text-brand-text">Atributos obligatorios</span>
+              <span class="text-xs font-medium text-brand-text-muted">
+                {{ lastMessageProgress.completedCount }} / {{ lastMessageProgress.total }}
+              </span>
+            </div>
+
+            <div class="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
+              <div
+                class="h-full bg-blue-500 rounded-full transition-all duration-300"
+                :style="{ width: `${Math.min(100, (lastMessageProgress.completedCount / lastMessageProgress.total) * 100)}%` }"
+              ></div>
+            </div>
+
+            <div class="flex gap-2">
+              <button
+                @click="showCompletedAttrs = !showCompletedAttrs"
+                class="flex items-center gap-1 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-600 border border-emerald-100"
+              >
+                <Check class="w-3 h-3" />
+                {{ Object.keys(lastMessageProgress.completed).length }} completados
+                <span :class="['transition-transform', showCompletedAttrs ? 'rotate-180' : '']">▾</span>
+              </button>
+              <button
+                @click="showPendingAttrs = !showPendingAttrs"
+                class="flex items-center gap-1 px-3 py-1 rounded-full text-xs font-semibold bg-gray-50 text-gray-500 border border-gray-200"
+              >
+                {{ lastMessageProgress.pending.length }} pendientes
+                <span :class="['transition-transform', showPendingAttrs ? 'rotate-180' : '']">▾</span>
+              </button>
+            </div>
+
+            <div v-if="showCompletedAttrs" class="flex flex-col gap-1.5">
+              <div
+                v-for="(value, name) in lastMessageProgress.completed"
+                :key="name"
+                class="px-3 py-2 rounded-lg bg-emerald-50/60 border border-emerald-100 text-xs text-emerald-700"
+              >
+                <span class="font-semibold">{{ name }}</span>: {{ value }}
+              </div>
+            </div>
+
+            <div v-if="showPendingAttrs" class="flex flex-col gap-1.5">
+              <div
+                v-for="name in lastMessageProgress.pending"
+                :key="name"
+                class="px-3 py-2 rounded-lg bg-gray-50 border border-gray-100 text-xs text-gray-500"
+              >
+                {{ name }}
+              </div>
+            </div>
           </div>
 
           <!-- Opciones dinámicas: botones que manda el backend real en options,
