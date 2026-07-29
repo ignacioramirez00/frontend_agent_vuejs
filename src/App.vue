@@ -75,7 +75,7 @@ watch(() => messages.value.length, () => {
   scrollToBottom();
 }, { deep: true });
 
-const sessionId = "67890";
+const sessionId = "8de3bff5-39db-4a72-bc19-cb8e8b9421d0";
 const dynamicOptions = ref<{ value: string; label: string }[]>([]);
 const dynamicLinks = ref<{ code: string; description: string; url: string }[]>([]);
 const catalogProgress = ref<{ pending: string[]; completed: Record<string, string> } | null>(null);
