@@ -46,6 +46,10 @@ interface Message {
   // Progreso de atributos obligatorios (AgentResponse.catalogProgress) para
   // este mensaje puntual — null/ausente fuera de la fase de catalogación.
   catalogProgress?: CatalogProgress | null;
+  // Texto sugerido para el input (AgentResponse.placeholder) — indica qué se
+  // espera que el usuario escriba en el turno siguiente (ej. "Ingresa el
+  // diámetro"). null/ausente significa usar el placeholder genérico.
+  placeholder?: string | null;
 }
 
 // Initial mockup conversation
@@ -174,7 +178,8 @@ const initSession = async () => {
         content: data.text ?? '',
         time: getCurrentTime(),
         options: data.options,
-        catalogProgress: data.catalogProgress
+        catalogProgress: data.catalogProgress,
+        placeholder: data.placeholder
       }
     ];
   } catch (error) {
@@ -270,6 +275,7 @@ const sendMessage = async (customText?: string) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         sessionId: sessionId,
+        //clientCode: userContext.clientCode,
         type: "text",
         message: payloadMessage
       })
@@ -310,7 +316,8 @@ const sendMessage = async (customText?: string) => {
       isDraft,
       draftContent: draftContent || undefined,
       options: data.options,
-      catalogProgress: data.catalogProgress
+      catalogProgress: data.catalogProgress,
+      placeholder: data.placeholder
     });
 
   } catch (error) {
@@ -363,7 +370,8 @@ const handleQuickReply = async (label: string, value: string) => {
       content: data.text ?? '',
       time: getCurrentTime(),
       options: data.options,
-      catalogProgress: data.catalogProgress
+      catalogProgress: data.catalogProgress,
+      placeholder: data.placeholder
     });
   } catch(e) {
     messages.value.push({
@@ -398,6 +406,15 @@ const lastMessageProgress = computed<CatalogProgress | null>(() => {
 
 const showCompletedAttrs = ref(true);
 const showPendingAttrs = ref(true);
+
+// Placeholder sugerido por el backend para el turno actual (AgentResponse.placeholder,
+// ej. "Ingresa el diámetro" durante catalogación) — si no viene, se usa el genérico.
+const DEFAULT_PLACEHOLDER = 'Escribe un mensaje al Asistente IA...';
+const lastMessagePlaceholder = computed<string>(() => {
+  const lastMsg = messages.value[messages.value.length - 1];
+  if (!lastMsg || lastMsg.role !== 'assistant') return DEFAULT_PLACEHOLDER;
+  return lastMsg.placeholder || DEFAULT_PLACEHOLDER;
+});
 </script>
 
 <template>
@@ -739,8 +756,8 @@ const showPendingAttrs = ref(true);
           <textarea 
             v-model="inputMessage"
             @keydown.enter.exact.prevent="sendMessage()"
-            class="w-full bg-transparent border-none focus:outline-none focus:ring-0 resize-none text-[15px] py-2.5 px-2 max-h-[140px] text-brand-text placeholder:text-gray-400" 
-            placeholder="Escribe un mensaje al Asistente IA..."
+            class="w-full bg-transparent border-none focus:outline-none focus:ring-0 resize-none text-[15px] py-2.5 px-2 max-h-[140px] text-brand-text placeholder:text-gray-400"
+            :placeholder="lastMessagePlaceholder"
             rows="1"
             ref="inputArea"
           ></textarea>
