@@ -32,6 +32,37 @@ interface CatalogProgress {
   completedCount: number;
 }
 
+// AgentResponse.inputConfig — cómo hay que renderizar el área de input en
+// este turno. El widget real despacha por `type`: `text` muestra la caja,
+// `buttons`/`autocomplete` muestran las opciones (sin caja), `attribute` es
+// la UI de atributos de la catalogación y `none` no muestra nada. Acá se
+// replica lo justo para poder probarlo. El `placeholder` que antes se leía de
+// un campo suelto de la respuesta viaja adentro de este objeto.
+interface InputConfig {
+  type: 'text' | 'buttons' | 'autocomplete' | 'attribute' | 'none';
+  options?: OptionItem[];
+  placeholder?: string;
+  attributeName?: string;
+}
+
+// AgentResponse.result — cierre del wizard. Su presencia es lo que hace
+// aparecer la tarjeta de "Solicitud completada", que en el widget real
+// reemplaza por completo al área de input.
+interface WizardResult {
+  success: boolean;
+  message: string;
+  summary: Record<string, string>;
+  materialId?: string | null;
+}
+
+// AgentResponse.wizard — progreso del formulario guiado, para el header.
+interface WizardProgress {
+  currentStep: number;
+  totalSteps: number;
+  stepName: string;
+  progress: number;
+}
+
 interface Message {
   id: string;
   role: 'assistant' | 'user';
@@ -40,16 +71,15 @@ interface Message {
   isDraft?: boolean;
   draftContent?: string;
   isCustomResponse?: boolean;
-  // Botones que ofrece el backend real (AgentResponse.options) para este
-  // mensaje puntual — vacío/ausente significa "responder con texto libre".
-  options?: OptionItem[];
-  // Progreso de atributos obligatorios (AgentResponse.catalogProgress) para
-  // este mensaje puntual — null/ausente fuera de la fase de catalogación.
+  // Los tres campos de abajo son el estado que el backend manda POR TURNO, así
+  // que se guardan junto al mensaje: lo que valga para el último mensaje del
+  // asistente es lo que se pinta.
+  inputConfig?: InputConfig | null;
+  // Progreso de atributos obligatorios (AgentResponse.catalogProgress) —
+  // null/ausente fuera de la fase de catalogación.
   catalogProgress?: CatalogProgress | null;
-  // Texto sugerido para el input (AgentResponse.placeholder) — indica qué se
-  // espera que el usuario escriba en el turno siguiente (ej. "Ingresa el
-  // diámetro"). null/ausente significa usar el placeholder genérico.
-  placeholder?: string | null;
+  result?: WizardResult | null;
+  wizard?: WizardProgress | null;
 }
 
 // Initial mockup conversation
@@ -147,6 +177,24 @@ const renderContent = (text: string): string => {
   return marked.parse(text, { breaks: true, gfm: true }) as string;
 };
 
+/**
+ * Traduce una respuesta del backend (AgentResponse) al mensaje que renderiza
+ * el chat. Un solo lugar para todo el contrato, igual que el widget real, que
+ * resuelve la respuesta entera en un handler: `message` a la burbuja,
+ * `inputConfig` al área de input, `wizard` al header y `result` a la tarjeta.
+ */
+const assistantMessageFrom = (data: any, extra: Partial<Message> = {}): Message => ({
+  id: `msg-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  role: 'assistant',
+  content: data.message ?? '',
+  time: getCurrentTime(),
+  inputConfig: data.inputConfig ?? null,
+  catalogProgress: data.catalogProgress ?? null,
+  result: data.result ?? null,
+  wizard: data.wizard ?? null,
+  ...extra
+});
+
 const initSession = async () => {
   try {
     const response = await fetch('/api/chat', {
@@ -170,18 +218,7 @@ const initSession = async () => {
       content: h.text,
       time: getCurrentTime()
     }));
-    messages.value = [
-      ...history,
-      {
-        id: `msg-${Date.now()}`,
-        role: 'assistant',
-        content: data.text ?? '',
-        time: getCurrentTime(),
-        options: data.options,
-        catalogProgress: data.catalogProgress,
-        placeholder: data.placeholder
-      }
-    ];
+    messages.value = [...history, assistantMessageFrom(data)];
   } catch (error) {
     console.error("Failed to init session", error);
     // Sin backend disponible: mostrar el mock de bienvenida en vez de dejar
@@ -221,6 +258,25 @@ const resetChat = () => {
   showMenu.value = false;
   attachedFile.value = null;
   scrollToBottom();
+};
+
+// Conversación nueva de verdad, contra el backend. Es lo que hace el
+// `resetChat` del widget real, y es a lo que están ligados tanto el botón
+// "Nueva consulta" de la tarjeta de cierre como el `restart` de la despedida:
+// limpia la ventana y manda type="init" con el userContext completo (el
+// thread anterior ya lo borró el backend al terminar, así que una selection
+// normal no tendría de dónde reconstruir la sesión).
+const restartSession = async () => {
+  messages.value = [];
+  showMenu.value = false;
+  attachedFile.value = null;
+  isTyping.value = true;
+  try {
+    await initSession();
+  } finally {
+    isTyping.value = false;
+    await scrollToBottom();
+  }
 };
 
 // Simulate attachment selection
@@ -290,7 +346,7 @@ const sendMessage = async (customText?: string) => {
     // Parse response to check if it contains a drafted email
     // If it contains double quotes containing "Hi team" or has clear "Dear" / "Hi" / subject etc, we can highlight it.
     // Let's do a smart regex check to display draft emails in high-fidelity boxes!
-    let contentText = data.text;
+    let contentText = data.message ?? '';
     let isDraft = false;
     let draftContent = "";
     let mainContent = contentText;
@@ -308,17 +364,11 @@ const sendMessage = async (customText?: string) => {
       }
     }
 
-    messages.value.push({
-      id: `msg-${Date.now() + 1}`,
-      role: 'assistant',
+    messages.value.push(assistantMessageFrom(data, {
       content: mainContent,
-      time: getCurrentTime(),
       isDraft,
-      draftContent: draftContent || undefined,
-      options: data.options,
-      catalogProgress: data.catalogProgress,
-      placeholder: data.placeholder
-    });
+      draftContent: draftContent || undefined
+    }));
 
   } catch (error) {
     console.error('API Error:', error);
@@ -342,6 +392,13 @@ const sendMessage = async (customText?: string) => {
 // esta intercepción, el thread ya está borrado y una selection nunca trae
 // userContext para reconstruirlo).
 const handleQuickReply = async (label: string, value: string) => {
+  // El widget real no manda esto como selection: llama a su resetChat, que
+  // limpia la ventana y arranca una conversación nueva con type="init".
+  if (value === "restart") {
+    await restartSession();
+    return;
+  }
+
   messages.value.push({
     id: `msg-${Date.now()}`,
     role: 'user',
@@ -353,26 +410,13 @@ const handleQuickReply = async (label: string, value: string) => {
   await scrollToBottom();
 
   try {
-    const body = value === "restart"
-      ? { sessionId, type: "init", userContext }
-      : { sessionId, type: "selection", selection: { value, label } };
-
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
+      body: JSON.stringify({ sessionId, type: "selection", selection: { value, label } })
     });
     if (!response.ok) throw new Error("Server error");
-    const data = await response.json();
-    messages.value.push({
-      id: `msg-${Date.now() + 1}`,
-      role: 'assistant',
-      content: data.text ?? '',
-      time: getCurrentTime(),
-      options: data.options,
-      catalogProgress: data.catalogProgress,
-      placeholder: data.placeholder
-    });
+    messages.value.push(assistantMessageFrom(await response.json()));
   } catch(e) {
     messages.value.push({
       id: `msg-${Date.now() + 1}`,
@@ -386,35 +430,89 @@ const handleQuickReply = async (label: string, value: string) => {
   }
 };
 
-// Opciones dinámicas del último mensaje del asistente (options que manda el
-// backend real: AgentResponse.options). Reemplaza el string-match hardcodeado
-// contra el texto del mensaje mock inicial, que no reflejaba nada del backend.
-const lastMessageOptions = computed<OptionItem[]>(() => {
+// Último mensaje del asistente: es el que manda lo que se pinta ahora
+// (opciones, progreso, tarjeta de cierre). Si el último es del usuario,
+// estamos esperando respuesta y no hay nada que mostrar.
+const lastAssistantTurn = computed<Message | null>(() => {
   const lastMsg = messages.value[messages.value.length - 1];
-  if (!lastMsg || lastMsg.role !== 'assistant') return [];
-  return lastMsg.options?.length ? lastMsg.options : [];
+  return lastMsg && lastMsg.role === 'assistant' ? lastMsg : null;
 });
+
+// Opciones del turno actual. Vienen dentro de AgentResponse.inputConfig, que
+// además dice CÓMO pedirlas (botones o autocomplete).
+const lastMessageOptions = computed<OptionItem[]>(
+  () => lastAssistantTurn.value?.inputConfig?.options ?? []
+);
 
 // Progreso de atributos obligatorios del último mensaje del asistente
 // (AgentResponse.catalogProgress) — solo existe durante la fase "catalog".
 const lastMessageProgress = computed<CatalogProgress | null>(() => {
-  const lastMsg = messages.value[messages.value.length - 1];
-  if (!lastMsg || lastMsg.role !== 'assistant') return null;
-  const progress = lastMsg.catalogProgress;
+  const progress = lastAssistantTurn.value?.catalogProgress;
   return progress && progress.total > 0 ? progress : null;
 });
 
 const showCompletedAttrs = ref(true);
 const showPendingAttrs = ref(true);
 
-// Placeholder sugerido por el backend para el turno actual (AgentResponse.placeholder,
-// ej. "Ingresa el diámetro" durante catalogación) — si no viene, se usa el genérico.
+// Placeholder sugerido por el backend para el turno actual (ej. "Ingresa el
+// diámetro..." en catalogación, o el del campo del wizard). Ahora viaja
+// dentro de inputConfig, no como campo suelto de la respuesta.
 const DEFAULT_PLACEHOLDER = 'Escribe un mensaje al Asistente IA...';
-const lastMessagePlaceholder = computed<string>(() => {
-  const lastMsg = messages.value[messages.value.length - 1];
-  if (!lastMsg || lastMsg.role !== 'assistant') return DEFAULT_PLACEHOLDER;
-  return lastMsg.placeholder || DEFAULT_PLACEHOLDER;
+const lastMessagePlaceholder = computed<string>(
+  () => lastAssistantTurn.value?.inputConfig?.placeholder || DEFAULT_PLACEHOLDER
+);
+
+// El widget real solo deja escribir cuando el turno espera texto: con
+// `buttons`/`autocomplete` muestra las opciones y con `none` no muestra nada.
+// Replicarlo acá es lo que permite detectar si el backend manda el tipo mal.
+const canTypeFreeText = computed<boolean>(() => {
+  const type = lastAssistantTurn.value?.inputConfig?.type;
+  return !type || type === 'text' || type === 'attribute';
 });
+
+// inputConfig.type = "autocomplete": el motor del wizard lo manda cuando el
+// campo tiene más de 6 opciones (AUTOCOMPLETE_THRESHOLD en engine.py). El
+// widget real pinta un buscador en vez de la lista entera — con "Grupo de
+// Compra", que trae 171, la diferencia se nota.
+const isAutocompleteTurn = computed<boolean>(
+  () => lastAssistantTurn.value?.inputConfig?.type === 'autocomplete'
+);
+
+const autocompleteQuery = ref('');
+
+const filteredOptions = computed<OptionItem[]>(() => {
+  const query = autocompleteQuery.value.trim().toLowerCase();
+  if (!query) return lastMessageOptions.value;
+  return lastMessageOptions.value.filter(opt => opt.label.toLowerCase().includes(query));
+});
+
+const selectFirstMatch = () => {
+  const first = filteredOptions.value[0];
+  if (first) handleQuickReply(first.label, first.value);
+};
+
+// La búsqueda pertenece al turno actual: cuando llega uno nuevo se limpia.
+watch(() => messages.value.length, () => {
+  autocompleteQuery.value = '';
+});
+
+// AgentResponse.result — su sola presencia dispara la tarjeta de cierre, que
+// en el widget real reemplaza al área de input.
+const lastResult = computed<WizardResult | null>(() => lastAssistantTurn.value?.result ?? null);
+
+// Mismo filtro que el widget real: descarta vacíos y los "-" que el backend
+// usa para "sin dato".
+const summaryEntries = computed<[string, string][]>(() =>
+  Object.entries(lastResult.value?.summary ?? {}).filter(
+    ([, value]) => value && value !== '-' && value.trim() !== ''
+  )
+);
+const showSummary = ref(true);
+
+// AgentResponse.wizard — "Paso N de M" + barra, mientras dura el formulario.
+const lastWizardProgress = computed<WizardProgress | null>(
+  () => lastAssistantTurn.value?.wizard ?? null
+);
 </script>
 
 <template>
@@ -427,12 +525,27 @@ const lastMessagePlaceholder = computed<string>(() => {
           <Bot class="text-gray-600 w-5 h-5" />
           <span class="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 rounded-full border-2 border-white"></span>
         </div>
-        <div>
+        <div class="min-w-0">
           <h1 class="text-base font-semibold text-brand-text flex items-center gap-1.5 leading-tight">
             AI Assistant
             <Sparkles class="w-4 h-4 text-gray-400 animate-pulse" />
           </h1>
-          <p class="text-[11px] text-brand-text-muted flex items-center gap-1 font-medium">
+          <!-- Progreso del formulario guiado (AgentResponse.wizard), igual que
+               el header del widget real: "Paso N de M: campo" + barra. El
+               currentStep del backend es 0-based, de ahí el +1. -->
+          <div v-if="lastWizardProgress" class="flex items-center gap-2">
+            <span class="text-[11px] text-brand-text-muted font-medium truncate max-w-[260px]">
+              Paso {{ lastWizardProgress.currentStep + 1 }} de {{ lastWizardProgress.totalSteps }}:
+              {{ lastWizardProgress.stepName }}
+            </span>
+            <div class="w-20 h-1 bg-gray-100 rounded-full overflow-hidden flex-shrink-0">
+              <div
+                class="h-full bg-blue-500 rounded-full transition-all duration-300"
+                :style="{ width: `${lastWizardProgress.progress}%` }"
+              ></div>
+            </div>
+          </div>
+          <p v-else class="text-[11px] text-brand-text-muted flex items-center gap-1 font-medium">
             Online
           </p>
         </div>
@@ -496,8 +609,15 @@ const lastMessagePlaceholder = computed<string>(() => {
 
         <!-- Messages List with Transitions -->
         <div class="flex flex-col gap-5">
-          <div 
-            v-for="msg in messages" 
+          <!-- Un mensaje del asistente sin contenido NO se pinta: pasa cuando
+               se reanuda una conversación cuyo último turno murió con un 500
+               (el backend manda `message` vacío a propósito, para no mostrar el
+               texto del usuario como si fuera del bot). El mensaje igual existe
+               en la lista porque es el que carga el estado del turno —
+               inputConfig, wizard, result—, solo no tiene burbuja. -->
+          <div
+            v-for="msg in messages"
+            v-show="msg.role === 'user' || msg.content"
             :key="msg.id"
             :class="['flex flex-col max-w-[75%] transition-all duration-300', msg.role === 'user' ? 'items-end self-end' : 'items-start']"
           >
@@ -633,11 +753,13 @@ const lastMessagePlaceholder = computed<string>(() => {
             </div>
           </div>
 
-          <!-- Opciones dinámicas: botones que manda el backend real en options,
-               para el último mensaje del asistente (division, combos del wizard,
-               menú principal, etc. — lo que sea que responda el turno actual) -->
+          <!-- Opciones del turno actual. El backend dice CÓMO pedirlas en
+               inputConfig.type: `buttons` para listas cortas y `autocomplete`
+               cuando hay más de 6 (ej. "Grupo de Compra" trae 171). Pintar 171
+               chips no es lo que hace el widget real, que ahí muestra un
+               buscador — por eso los dos modos están separados. -->
           <div
-            v-if="lastMessageOptions.length && !isTyping"
+            v-if="lastMessageOptions.length && !isTyping && !isAutocompleteTurn"
             class="flex gap-2 ml-10 flex-wrap py-1"
           >
             <button
@@ -648,6 +770,41 @@ const lastMessagePlaceholder = computed<string>(() => {
             >
               {{ opt.label }}
             </button>
+          </div>
+
+          <!-- inputConfig.type = "autocomplete": buscador sobre las opciones -->
+          <div
+            v-if="isAutocompleteTurn && !isTyping"
+            class="ml-10 flex flex-col gap-2 bg-white border border-gray-100 rounded-2xl shadow-sm p-3 max-w-lg"
+          >
+            <input
+              v-model="autocompleteQuery"
+              @keydown.enter.prevent="selectFirstMatch"
+              type="text"
+              :placeholder="lastMessagePlaceholder"
+              class="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-sm text-brand-text placeholder:text-gray-400 focus:outline-none focus:border-gray-300 focus:bg-white"
+            />
+            <div class="flex items-center justify-between px-1">
+              <span class="text-[11px] text-brand-text-muted font-medium">
+                {{ filteredOptions.length }} de {{ lastMessageOptions.length }} opciones
+              </span>
+              <span v-if="filteredOptions.length" class="text-[11px] text-gray-400">
+                Enter elige la primera
+              </span>
+            </div>
+            <div v-if="filteredOptions.length" class="flex flex-col gap-1 max-h-56 overflow-y-auto">
+              <button
+                v-for="opt in filteredOptions"
+                :key="opt.value"
+                @click="handleQuickReply(opt.label, opt.value)"
+                class="text-left px-3 py-2 rounded-lg text-xs text-brand-text hover:bg-gray-50 active:scale-98 transition-all cursor-pointer"
+              >
+                {{ opt.label }}
+              </button>
+            </div>
+            <p v-else class="px-3 py-2 text-xs text-brand-text-muted">
+              Ninguna opción coincide con "{{ autocompleteQuery }}".
+            </p>
           </div>
 
           <!-- Typing / Thinking Indicator -->
@@ -739,7 +896,73 @@ const lastMessagePlaceholder = computed<string>(() => {
           </button>
         </div>
 
-        <div class="relative flex items-end gap-2 bg-gray-50 rounded-2xl border border-gray-200/80 focus-within:border-gray-300 focus-within:bg-white focus-within:shadow-sm transition-all duration-200 p-1.5">
+        <!-- Tarjeta de cierre del wizard (AgentResponse.result). En el widget
+             real REEMPLAZA al área de input, así que acá se hace lo mismo: si
+             hay result, no se muestra la caja de texto. -->
+        <div
+          v-if="lastResult"
+          :class="[
+            'flex flex-col gap-3 rounded-2xl border p-5',
+            lastResult.success ? 'bg-emerald-50/60 border-emerald-100' : 'bg-amber-50/60 border-amber-100'
+          ]"
+        >
+          <div class="flex items-center gap-3">
+            <div
+              :class="[
+                'w-9 h-9 rounded-full flex items-center justify-center text-white flex-shrink-0',
+                lastResult.success ? 'bg-emerald-500' : 'bg-amber-500'
+              ]"
+            >
+              <Check v-if="lastResult.success" class="w-5 h-5" />
+              <AlertCircle v-else class="w-5 h-5" />
+            </div>
+            <div class="min-w-0">
+              <h3 class="text-sm font-semibold text-brand-text">
+                {{ lastResult.success ? 'Solicitud completada' : 'No se pudo completar' }}
+              </h3>
+              <p class="text-xs text-brand-text-muted">
+                <!-- Igual que el widget real: en el camino de fallo ignora
+                     result.message y usa su propio texto. -->
+                {{ lastResult.success
+                    ? (lastResult.message || 'La solicitud se ha procesado correctamente.')
+                    : 'No se pudo crear el material en el sistema. Revisa el resumen e intenta nuevamente.' }}
+              </p>
+              <p v-if="lastResult.materialId" class="text-xs font-semibold text-brand-text mt-0.5">
+                ID del material: {{ lastResult.materialId }}
+              </p>
+            </div>
+          </div>
+
+          <div class="flex gap-2 flex-wrap">
+            <button
+              v-if="summaryEntries.length"
+              @click="showSummary = !showSummary"
+              class="px-3 py-1.5 rounded-full text-xs font-semibold bg-white border border-gray-200 text-brand-text-muted hover:text-brand-text cursor-pointer"
+            >
+              {{ showSummary ? 'Ocultar resumen' : 'Ver resumen' }} ({{ summaryEntries.length }})
+            </button>
+            <button
+              @click="restartSession"
+              class="px-3 py-1.5 rounded-full text-xs font-semibold bg-brand-text text-white hover:bg-gray-800 flex items-center gap-1.5 cursor-pointer"
+            >
+              <RefreshCw class="w-3 h-3" />
+              Nueva consulta
+            </button>
+          </div>
+
+          <div v-if="showSummary && summaryEntries.length" class="flex flex-col gap-1 max-h-64 overflow-y-auto">
+            <div
+              v-for="[name, value] in summaryEntries"
+              :key="name"
+              class="flex justify-between gap-4 px-3 py-2 rounded-lg bg-white/70 border border-gray-100 text-xs"
+            >
+              <span class="font-semibold text-brand-text-muted">{{ name }}</span>
+              <span class="text-brand-text text-right">{{ value }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div v-else class="relative flex items-end gap-2 bg-gray-50 rounded-2xl border border-gray-200/80 focus-within:border-gray-300 focus-within:bg-white focus-within:shadow-sm transition-all duration-200 p-1.5">
           <!-- Add Attachment Trigger Button -->
           <button 
             @click="showAttachmentModal = !showAttachmentModal"
@@ -752,24 +975,29 @@ const lastMessagePlaceholder = computed<string>(() => {
             <Plus class="w-5 h-5" />
           </button>
 
-          <!-- Main message input textarea -->
-          <textarea 
+          <!-- Main message input textarea. Se deshabilita cuando el turno
+               espera botones (inputConfig.type = buttons/autocomplete): el
+               widget real directamente no muestra la caja en ese caso, y
+               replicarlo acá deja en evidencia si el backend manda mal el
+               tipo. -->
+          <textarea
             v-model="inputMessage"
             @keydown.enter.exact.prevent="sendMessage()"
-            class="w-full bg-transparent border-none focus:outline-none focus:ring-0 resize-none text-[15px] py-2.5 px-2 max-h-[140px] text-brand-text placeholder:text-gray-400"
-            :placeholder="lastMessagePlaceholder"
+            :disabled="!canTypeFreeText"
+            class="w-full bg-transparent border-none focus:outline-none focus:ring-0 resize-none text-[15px] py-2.5 px-2 max-h-[140px] text-brand-text placeholder:text-gray-400 disabled:cursor-not-allowed"
+            :placeholder="canTypeFreeText ? lastMessagePlaceholder : 'Elige una de las opciones de arriba'"
             rows="1"
             ref="inputArea"
           ></textarea>
 
           <!-- Submit arrow send button -->
-          <button 
+          <button
             @click="sendMessage()"
-            aria-label="Send message" 
-            :disabled="!inputMessage.trim() && !attachedFile"
+            aria-label="Send message"
+            :disabled="!canTypeFreeText || (!inputMessage.trim() && !attachedFile)"
             :class="[
               'w-10 h-10 rounded-xl flex items-center justify-center transition-all flex-shrink-0 mb-[1px] mr-[1px]',
-              (inputMessage.trim() || attachedFile)
+              canTypeFreeText && (inputMessage.trim() || attachedFile)
                 ? 'bg-brand-text text-white hover:bg-gray-800 active:scale-95 shadow-sm cursor-pointer'
                 : 'bg-gray-100 text-gray-300 cursor-not-allowed'
             ]"

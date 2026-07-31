@@ -14,10 +14,13 @@ async function startServer() {
   // Proxy hacia el backend real del Chatbot (LangGraph/FastAPI).
   app.post("/api/chat", async (req, res) => {
     try {
+      // El body se reenvía TAL CUAL, sin agregar `stream: false`: el widget
+      // real tampoco manda ese campo y el backend ya responde JSON por
+      // defecto. Así este harness ejercita el mismo camino que producción.
       const backendRes = await fetch("http://localhost:8000/api/v1/agents/cataloging/invoke", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...req.body, stream: false }),
+        body: JSON.stringify(req.body),
       });
       const data = await backendRes.json();
       res.status(backendRes.status).json(data);
